@@ -1,6 +1,14 @@
 # MaLiAmPi
 ### Maximum Likelihood Amplicon Pipeline: An amplicon (PCR / 16S) microbiome pipeline.
-
+## leen's edits:
+My plan is to:
+* improve the DADA2 step, such that one can chunkify the input by study and then do random shuffling to chunkify WITHIN the study, if batch not present
+* after DADA2 is done, merge and deduplicate the ASVs, and make weight and map files
+* in main.nf, skip refpkg making
+* speed up pplacer and epa-ng by chunkifying the input by study, then within each study, then merge the jplaces after it's done.
+* cmalign ???
+* when doing placement, no need to run alpha-div / pca / krd
+* when doing placement, add the classify as a separate module
 ## Introduction
 Maliampi is a phylogenetic placement-based pipeline for handling 16S rRNA amplicons (the most common type of microbiome study data).
 
