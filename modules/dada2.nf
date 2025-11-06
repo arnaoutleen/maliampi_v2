@@ -514,6 +514,47 @@ process PRECHUNK {
   """
 }
 
+// Orchestrator: run one child Nextflow per chunk, cap concurrent runs
+process RUN_CHUNK_NF {
+  tag { "${study}:chunk_${chunk_id}" }
+  label 'orchestrator'
+  maxForks params.max_parallel_chunks
+  errorStrategy "finish"
+
+  input:
+    tuple val(study), val(chunk_id), path(chunk_manifest)
+
+  output:
+    // Emit one RDS per chunk from the work dir so we can merge in-pipeline
+    path "chunk_${chunk_id}.for_global_merge.rds", emit: chunk_seqtab_rds
+
+  script:
+  """
+  set -euo pipefail
+
+  outdir="${params.output}/chunks/${study}/chunk_${chunk_id}"
+  mkdir -p "${outdir}"
+
+  # Run a child Nextflow on this chunk manifest (no nested chunking, no global merge here)
+  nextflow run "${workflow.scriptFile}" \\
+    --manifest "${chunk_manifest}" \\
+    --output "${outdir}" \\
+    --chunks_per_study 1 \\
+    --chunk_size 0 \\
+    -resume
+
+  # Copy the best-available RDS up to this task dir so Nextflow can collect it
+  if [ -f "${outdir}/sv/dada2.combined.seqtabs.nochimera.rds" ]; then
+    cp "${outdir}/sv/dada2.combined.seqtabs.nochimera.rds" "chunk_${chunk_id}.for_global_merge.rds"
+  elif [ -f "${outdir}/sv/combined.dada2.seqtabs.rds" ]; then
+    cp "${outdir}/sv/combined.dada2.seqtabs.rds" "chunk_${chunk_id}.for_global_merge.rds"
+  else
+    echo "ERROR: No seqtab RDS found in \${outdir}/sv/" >&2
+    exit 1
+  fi
+  """
+}
+
 process dada2_ft {
     container "${container__dada2}"
     label 'io_mem'
@@ -1164,6 +1205,7 @@ def helpMessage() {
                                   or   'runs/*/sv/combined.dada2.seqtabs.rds'
                                   Writes merged outputs to: \${params.output}/sv_global/
 
+          Note: In chunked mode, the pipeline runs one child Nextflow per chunk (capped by --max_parallel_chunks) and merges all chunks at the end.
     SV-DADA2 options:
         --trimLeft              How far to trim on the left (default = 0)
         --maxN                  (default = 0)
@@ -1178,83 +1220,82 @@ def helpMessage() {
 }
 
 workflow {
-    if (params.manifest == null) {
-        helpMessage()
-        exit 0
-    }
+  if (params.manifest == null) {
+      helpMessage()
+      exit 0
+  }
 
-    // Optional: create per-study chunk manifests (no behavior change if only 1 chunk)
-    def do_chunk = ( (params.chunks_per_study != null && (params.chunks_per_study as int) > 1) ||
-                     (params.chunk_size != null && (params.chunk_size as int) > 0) )
-    if (do_chunk) {
-        PRECHUNK( file(params.manifest) )
-        log.info "[PRECHUNK] Wrote per-study chunk manifests under ./chunks and CHUNK_SUMMARY.tsv"
+  // Decide mode
+  def do_chunk = ( (params.chunks_per_study != null && (params.chunks_per_study as int) > 1) ||
+                   (params.chunk_size != null && (params.chunk_size as int) > 0) )
 
-        // To run chunks in parallel (without changing this module’s scientific steps),
-        // launch separate Nextflow runs for each sub-manifest, capped by --max_parallel_chunks.
-        // Example (bash):
-        //   ls chunks/*/chunk_*.csv | xargs -n1 -P ${params.max_parallel_chunks} -I{} \\
-        //     nextflow run ${workflow.manifest.name ?: 'dada2_leen.nf'} --manifest {} -resume --output ${params.output}
-    }
+  if (do_chunk) {
+      // === CHUNKED MODE ===
+      PRECHUNK( file(params.manifest) )
+      log.info "[PRECHUNK] Wrote per-study chunk manifests under ./chunks and CHUNK_SUMMARY.tsv"
 
-    // Load manifest!
-    manifest = read_manifest(
-        Channel.from(
-            file(params.manifest)
-        )
-    )
-    // manifest.valid_paired_indexed contains indexed paired reads
-    // manifest.valid_paired contains pairs verified to exist but without index.
+      // Build (study, chunk_id, chunk_manifest) tuples
+      Channel
+        .fromPath('chunks/*/chunk_*.csv')
+        .map { f ->
+          def m = (f.toString() =~ /chunks\\/(.+?)\\/chunk_(\\d+)\\.csv/)[0]
+          tuple(m[1], m[2] as int, file(f))
+        }
+        .toSortedList { a, b -> a[0] <=> b[0] ?: (a[1] as int) <=> (b[1] as int) }
+        .flatMap()
+        .set { chunk_triples_ch }
 
-    // Preprocess
-    preprocess_wf(
-        manifest.valid_paired_indexed,
-        manifest.valid_paired,
-        manifest.valid_unpaired
-    )       
-    // preprocess_wf.out.valid is the reads that survived the preprocessing steps.
-    // preprocess_wf.out.empty are the reads that ended up empty with preprocessing
+      // Run each chunk with concurrency cap
+      RUN_CHUNK_NF(chunk_triples_ch)
 
-    //
-    // Step 1: DADA2 to make sequence variants.
-    //
+      // Merge all chunks
+      global_seqtab_combine_all(RUN_CHUNK_NF.out)
+      dada2_remove_bimera_global(global_seqtab_combine_all.out.map{ file(it) })
+      Dada2_convert_output_global(dada2_remove_bimera_global.out[0].map{ file(it) })
+      log.info "[GLOBAL] Merged outputs written to: ${params.output}/sv_global/"
 
-    dada2_wf(
-        preprocess_wf.out.miseq_pe,
-        preprocess_wf.out.miseq_se,
-        preprocess_wf.out.pyro
-    )
+  } else {
+      // === SINGLE-MANIFEST MODE (original pipeline) ===
+      manifest = read_manifest(
+          Channel.from(
+              file(params.manifest)
+          )
+      )
 
+      preprocess_wf(
+          manifest.valid_paired_indexed,
+          manifest.valid_paired,
+          manifest.valid_unpaired
+      )
 
-    //
-    // Report specimens that failed at any step of making SVs
-    //
+      dada2_wf(
+          preprocess_wf.out.miseq_pe,
+          preprocess_wf.out.miseq_se,
+          preprocess_wf.out.pyro
+      )
 
+      output_failed(            
+          manifest.other.map { [it.specimen, 'failed at manifest'] }.mix(
+          preprocess_wf.out.empty.map{ [it[0], 'preprocessing'] }).mix(
+          dada2_wf.out.failures)
+          .toList()
+          .transpose()
+          .toList()
+      )
 
-    output_failed(            
-        manifest.other.map { [it.specimen, 'failed at manifest'] }.mix(
-        preprocess_wf.out.empty.map{ [it[0], 'preprocessing'] }).mix(
-        dada2_wf.out.failures)
-        .toList()
-        .transpose()
-        .toList()
-    )
-    // */
+      if (params.global_merge_glob != null) {
+          log.info "[GLOBAL] Collecting RDS for global merge from: ${params.global_merge_glob}"
+          Channel
+            .fromPath(params.global_merge_glob)
+            .ifEmpty { log.warn "[GLOBAL] No files matched --global_merge_glob: ${params.global_merge_glob}" }
+            .map { file(it) }
+            .toSortedList()
+            .set { global_seqtabs_rds_ch }
 
-    // === Optional: Merge multiple studies' seqtabs into one set of outputs ===
-    if (params.global_merge_glob != null) {
-        log.info "[GLOBAL] Collecting RDS for global merge from: ${params.global_merge_glob}"
-        Channel
-          .fromPath(params.global_merge_glob)
-          .ifEmpty { log.warn "[GLOBAL] No files matched --global_merge_glob: ${params.global_merge_glob}" }
-          .map { file(it) }
-          .toSortedList()
-          .set { global_seqtabs_rds_ch }
-
-        global_seqtab_combine_all(global_seqtabs_rds_ch)
-        dada2_remove_bimera_global(global_seqtab_combine_all.out.map{ file(it) })
-        Dada2_convert_output_global(dada2_remove_bimera_global.out[0].map{ file(it) })
-
-        log.info "[GLOBAL] Merged outputs written to: ${params.output}/sv_global/"
-    }
+          global_seqtab_combine_all(global_seqtabs_rds_ch)
+          dada2_remove_bimera_global(global_seqtab_combine_all.out.map{ file(it) })
+          Dada2_convert_output_global(dada2_remove_bimera_global.out[0].map{ file(it) })
+          log.info "[GLOBAL] Merged outputs written to: ${params.output}/sv_global/"
+      }
+  }
 }
