@@ -31,7 +31,17 @@ params.errM_nbases = '1e8'
 params.chimera_method = 'consensus'
 params.maxLenPyro = 'Inf'
 params.maxMismatch = 0
+
 params.minOverlap = 12
+
+// chunking controls (optional; default keeps current behavior)
+params.study_col            = 'study'
+params.batch_col            = null
+params.chunks_per_study     = 1       // if >1, split each study into this many chunks
+params.chunk_size           = null    // alternative to chunks_per_study: target rows per chunk
+params.shuffle_within       = false   // only when batch_col is null
+params.shuffle_seed         = 1337
+params.max_parallel_chunks  = 4       // hint for external parallelization
 
 // global merge across studies (optional)
 params.global_merge_glob = null  // e.g., 'runs/*/sv/dada2.combined.seqtabs.nochimera.rds' or 'runs/*/sv/combined.dada2.seqtabs.rds'
@@ -381,6 +391,128 @@ workflow dada2_wf {
     // */
 }
 
+
+// Optional: pre-chunk the manifest by study and (optionally) shuffle within study
+process PRECHUNK {
+  tag "prechunk"
+  label 'io_mem'
+  publishDir "chunks", mode: 'copy'
+
+  input:
+    path manifest_csv
+
+  output:
+    path "chunks/**.csv",            emit: chunk_manifests
+    path "chunks/CHUNK_MAP.tsv",     emit: chunk_map
+    path "chunks/CHUNK_SUMMARY.tsv", emit: chunk_summary
+
+  script:
+  """
+  python3 - <<'PY'
+  import csv, os, random, math, sys
+  manifest_path = "${manifest_csv}"
+  study_col     = ${params.study_col!r}
+  batch_col     = ${('null' if params.batch_col == null else params.batch_col)!r}
+  shuffle_within= ${'True' if params.shuffle_within else 'False'}
+  seed          = int(${params.shuffle_seed})
+  chunks_per    = ${'None' if params.chunks_per_study == null else int(params.chunks_per_study)}
+  chunk_size    = ${'None' if params.chunk_size == null else int(params.chunk_size)}
+
+  random.seed(seed)
+
+  # read manifest
+  with open(manifest_path, newline='') as f:
+      rows = list(csv.DictReader(f))
+  if not rows:
+      sys.exit("ERROR: manifest is empty")
+
+  headers = list(rows[0].keys())
+  if study_col not in headers:
+      study_col = 'ALL'
+      for r in rows: r['ALL'] = 'ALL'
+
+  # group by study
+  by_study = {}
+  for r in rows:
+      by_study.setdefault(r[study_col], []).append(r)
+
+  os.makedirs("chunks", exist_ok=True)
+  chunk_map = []
+  summary   = []
+
+  for study, items in by_study.items():
+      items = items[:]  # copy
+      if batch_col and batch_col in headers:
+          # round-robin by batch (deterministic interleave; no random shuffle)
+          buckets = {}
+          for r in items:
+              buckets.setdefault(r.get(batch_col, 'NA'), []).append(r)
+          keys = sorted(buckets.keys())
+          rr = []
+          exhausted = False
+          i = 0
+          while not exhausted:
+              exhausted = True
+              k = keys[i % len(keys)]
+              if buckets[k]:
+                  rr.append(buckets[k].pop(0))
+                  exhausted = False
+              i += 1
+          items = rr
+      elif shuffle_within:
+          random.shuffle(items)
+
+      n = len(items)
+      if chunks_per and chunks_per > 1:
+          k = chunks_per
+      elif chunk_size and chunk_size > 0:
+          k = max(1, math.ceil(n / float(chunk_size)))
+      else:
+          k = 1
+
+      per = math.ceil(n / float(k))
+      outdir = os.path.join("chunks", study)
+      os.makedirs(outdir, exist_ok=True)
+
+      for ci in range(k):
+          start = ci*per
+          end   = min(n, (ci+1)*per)
+          if start >= end:
+              continue
+          chunk_rows = items[start:end]
+          cpath = os.path.join(outdir, f"chunk_{ci+1}.csv")
+          with open(cpath, "w", newline='') as w:
+              wr = csv.DictWriter(w, fieldnames=headers)
+              wr.writeheader()
+              wr.writerows(chunk_rows)
+
+          for r in chunk_rows:
+              chunk_map.append({
+                "study": study, "chunk_id": f"{ci+1}",
+                "specimen": r.get("specimen",""),
+                "R1": r.get("R1",""), "R2": r.get("R2","")
+              })
+          summary.append({
+            "study": study, "chunk_id": f"{ci+1}",
+            "n_samples": len(chunk_rows)
+          })
+
+  with open("chunks/CHUNK_MAP.tsv","w", newline='') as w:
+      cols = ["study","chunk_id","specimen","R1","R2"]
+      w.write("\\t".join(cols)+"\\n")
+      for r in chunk_map:
+          w.write("\\t".join([str(r[c]) for c in cols])+"\\n")
+
+  with open("chunks/CHUNK_SUMMARY.tsv","w", newline='') as w:
+      cols = ["study","chunk_id","n_samples"]
+      w.write("\\t".join(cols)+"\\n")
+      for r in summary:
+          w.write("\\t".join([str(r[c]) for c in cols])+"\\n")
+
+  print(f"[PRECHUNK] studies: {len(by_study)} | total chunks: {len(summary)}")
+  PY
+  """
+}
 
 process dada2_ft {
     container "${container__dada2}"
@@ -1016,8 +1148,17 @@ def helpMessage() {
         -w                    Working directory. Defaults to `./work`
         -resume                 Attempt to restart from a prior run, only completely changed steps
 
+        Chunking (optional; advanced):
+          --study_col               Column holding study name (default: 'study')
+          --batch_col               Batch column (if present, disables shuffling)
+          --chunks_per_study        Split each study into this many chunks (default: 1)
+          --chunk_size              Alternative to chunks_per_study: target rows per chunk
+          --shuffle_within          Shuffle within study if no batch column (default: false)
+          --shuffle_seed            Seed for deterministic shuffling (default: 1337)
+          --max_parallel_chunks     Hint for external parallelization (default: 4)
+        
 
-        Global merge across studies (optional):
+    Global merge across studies (optional):
           --global_merge_glob     Glob for per-study seqtab RDS to merge
                                   e.g. 'runs/*/sv/dada2.combined.seqtabs.nochimera.rds'
                                   or   'runs/*/sv/combined.dada2.seqtabs.rds'
@@ -1040,6 +1181,20 @@ workflow {
     if (params.manifest == null) {
         helpMessage()
         exit 0
+    }
+
+    // Optional: create per-study chunk manifests (no behavior change if only 1 chunk)
+    def do_chunk = ( (params.chunks_per_study != null && (params.chunks_per_study as int) > 1) ||
+                     (params.chunk_size != null && (params.chunk_size as int) > 0) )
+    if (do_chunk) {
+        PRECHUNK( file(params.manifest) )
+        log.info "[PRECHUNK] Wrote per-study chunk manifests under ./chunks and CHUNK_SUMMARY.tsv"
+
+        // To run chunks in parallel (without changing this module’s scientific steps),
+        // launch separate Nextflow runs for each sub-manifest, capped by --max_parallel_chunks.
+        // Example (bash):
+        //   ls chunks/*/chunk_*.csv | xargs -n1 -P ${params.max_parallel_chunks} -I{} \\
+        //     nextflow run ${workflow.manifest.name ?: 'dada2_leen.nf'} --manifest {} -resume --output ${params.output}
     }
 
     // Load manifest!
