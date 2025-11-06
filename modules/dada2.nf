@@ -536,12 +536,13 @@ process RUN_CHUNK_NF {
   mkdir -p "${outdir}"
 
   # Run a child Nextflow on this chunk manifest (no nested chunking, no global merge here)
-  nextflow run "${workflow.scriptFile}" \\
-    --manifest "${chunk_manifest}" \\
-    --output "${outdir}" \\
-    --chunks_per_study 1 \\
-    --chunk_size 0 \\
-    -resume
+  nextflow run "${workflow.scriptFile}" \
+      --manifest "${chunk_manifest}" \
+      --output "${outdir}" \
+      --chunks_per_study 1 \
+      --chunk_size 0 \
+      -w "${outdir}/work" \
+      -resume
 
   # Copy the best-available RDS up to this task dir so Nextflow can collect it
   if [ -f "${outdir}/sv/dada2.combined.seqtabs.nochimera.rds" ]; then
@@ -1249,7 +1250,11 @@ workflow {
       RUN_CHUNK_NF(chunk_triples_ch)
 
       // Merge all chunks
-      global_seqtab_combine_all(RUN_CHUNK_NF.out)
+      global_seqtab_combine_all(
+          RUN_CHUNK_NF.out
+            .map { file(it) }   // ensure File objects
+            .toSortedList()     // collect into one list
+        )
       dada2_remove_bimera_global(global_seqtab_combine_all.out.map{ file(it) })
       Dada2_convert_output_global(dada2_remove_bimera_global.out[0].map{ file(it) })
       log.info "[GLOBAL] Merged outputs written to: ${params.output}/sv_global/"
