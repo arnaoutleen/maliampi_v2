@@ -33,6 +33,9 @@ params.maxLenPyro = 'Inf'
 params.maxMismatch = 0
 params.minOverlap = 12
 
+// global merge across studies (optional)
+params.global_merge_glob = null  // e.g., 'runs/*/sv/dada2.combined.seqtabs.nochimera.rds' or 'runs/*/sv/combined.dada2.seqtabs.rds'
+
 workflow dada2_wf {
     take: miseq_pe_ch
     take: miseq_se_ch
@@ -791,6 +794,83 @@ process dada2_seqtab_combine_all {
     """
 }
 
+// === Global merge across studies (optional) ===
+// Combine multiple per-study seqtab RDS files into one table, then (optionally) run chimera removal and export pplacer-style outputs.
+process global_seqtab_combine_all {
+    container "${container__fastcombineseqtab}"
+    label 'io_mem'
+    errorStrategy "finish"
+
+    input:
+        file(seqtabs_rds)
+
+    output:
+        file("global.combined.dada2.seqtabs.rds")
+
+    """
+    set -e
+
+    combine_seqtab \
+    --rds global.combined.dada2.seqtabs.rds \
+    --seqtabs ${seqtabs_rds}
+    """
+}
+
+process dada2_remove_bimera_global {
+    container "${container__dada2}"
+    label 'mem_veryhigh'
+    errorStrategy "finish"
+    publishDir "${params.output}/sv_global/", mode: 'copy'
+
+    input:
+        file(global_combined_seqtab)
+
+    output:
+        file("dada2.global.seqtabs.nochimera.csv")
+        file("dada2.global.seqtabs.nochimera.rds")
+
+    script:
+    """
+    #!/usr/bin/env Rscript
+    library('dada2');
+    seqtab <- readRDS('${global_combined_seqtab}');
+    seqtab_nochim <- removeBimeraDenovo(
+        seqtab,
+        method = '${params.chimera_method}',
+        multithread = ${task.cpus}
+    );
+    saveRDS(seqtab_nochim, 'dada2.global.seqtabs.nochimera.rds'); 
+    write.csv(seqtab_nochim, 'dada2.global.seqtabs.nochimera.csv', na='');
+    print((sum(seqtab) - sum(seqtab_nochim)) / sum(seqtab));
+    """
+}
+
+process Dada2_convert_output_global {
+    container "${container__dada2pplacer}"
+    label 'io_mem'
+    publishDir "${params.output}/sv_global/", mode: 'copy'
+    errorStrategy "finish"
+
+    input:
+        path (global_final_seqtab_csv)
+
+    output:
+        path "dada2.sv.fasta",       emit: global_sv_fasta
+        path "dada2.sv.map.csv",     emit: global_sv_map
+        path "dada2.sv.weights.csv", emit: global_sv_weights
+        path "dada2.specimen.sv.long.csv", emit: global_sv_long
+        path "dada2.sv.shared.txt",  emit: global_sharetable
+
+    """
+    dada2-seqtab-to-pplacer \
+    -s ${global_final_seqtab_csv} \
+    -f dada2.sv.fasta \
+    -m dada2.sv.map.csv \
+    -w dada2.sv.weights.csv \
+    -L dada2.specimen.sv.long.csv \
+    -t dada2.sv.shared.txt
+    """
+}
 
 process dada2_remove_bimera {
     container "${container__dada2}"
@@ -936,6 +1016,13 @@ def helpMessage() {
         -w                    Working directory. Defaults to `./work`
         -resume                 Attempt to restart from a prior run, only completely changed steps
 
+
+        Global merge across studies (optional):
+          --global_merge_glob     Glob for per-study seqtab RDS to merge
+                                  e.g. 'runs/*/sv/dada2.combined.seqtabs.nochimera.rds'
+                                  or   'runs/*/sv/combined.dada2.seqtabs.rds'
+                                  Writes merged outputs to: \${params.output}/sv_global/
+
     SV-DADA2 options:
         --trimLeft              How far to trim on the left (default = 0)
         --maxN                  (default = 0)
@@ -999,4 +1086,20 @@ workflow {
     )
     // */
 
+    // === Optional: Merge multiple studies' seqtabs into one set of outputs ===
+    if (params.global_merge_glob != null) {
+        log.info "[GLOBAL] Collecting RDS for global merge from: ${params.global_merge_glob}"
+        Channel
+          .fromPath(params.global_merge_glob)
+          .ifEmpty { log.warn "[GLOBAL] No files matched --global_merge_glob: ${params.global_merge_glob}" }
+          .map { file(it) }
+          .toSortedList()
+          .set { global_seqtabs_rds_ch }
+
+        global_seqtab_combine_all(global_seqtabs_rds_ch)
+        dada2_remove_bimera_global(global_seqtab_combine_all.out.map{ file(it) })
+        Dada2_convert_output_global(dada2_remove_bimera_global.out[0].map{ file(it) })
+
+        log.info "[GLOBAL] Merged outputs written to: ${params.output}/sv_global/"
+    }
 }
