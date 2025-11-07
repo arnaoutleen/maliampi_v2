@@ -510,7 +510,7 @@ process EPAngPlacementChunk {
     
     # Derive a unique prefix from the chunk fasta name
     base=$(basename "${chunk_aln_fasta}")
-    prefix="${base%.fasta}"
+    prefix="\${base%.fasta}"
 
     # Split the combined (ref + query) internally and place
     epa-ng --split ${refpkg_aln_fasta} ${chunk_aln_fasta}
