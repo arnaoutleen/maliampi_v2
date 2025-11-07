@@ -179,95 +179,96 @@ process PrepSVStudyFastas {
     def chunk_size = params.sv_chunk_size as int
 
     """
-    #!/usr/bin/env python
-    import argparse, os, re, sys
-    from collections import OrderedDict, defaultdict
-    import pandas as pd
+python3 - <<'PY'
+import argparse, os, re, sys
+from collections import OrderedDict, defaultdict
+import pandas as pd
 
-    def read_fasta_to_dict(fp):
-        seqs = OrderedDict()
-        current_id = None
-        buf = []
-        with open(fp, "rt") as fh:
-            for line in fh:
-                line = line.rstrip("\\n")
-                if not line:
-                    continue
-                if line.startswith(">"):
-                    if current_id is not None:
-                        seqs[current_id] = "".join(buf)
-                    header = line[1:].strip()
-                    sv_id = header.split()[0]
-                    current_id = sv_id
-                    buf = []
-                else:
-                    buf.append(line)
-        if current_id is not None:
-            seqs[current_id] = "".join(buf)
-        return seqs
+def read_fasta_to_dict(fp):
+    seqs = OrderedDict()
+    current_id = None
+    buf = []
+    with open(fp, "rt") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current_id is not None:
+                    seqs[current_id] = "".join(buf)
+                header = line[1:].strip()
+                sv_id = header.split()[0]
+                current_id = sv_id
+                buf = []
+            else:
+                buf.append(line)
+    if current_id is not None:
+        seqs[current_id] = "".join(buf)
+    return seqs
 
-    def sanitize_name(name):
-        return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+def sanitize_name(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
 
-    def write_fasta(out_path, id_list, id_to_seq):
-        missing = 0
-        with open(out_path, "wt") as out_h:
-            for sv in id_list:
-                seq = id_to_seq.get(sv)
-                if not seq:
-                    missing += 1
-                    continue
-                out_h.write(f">{sv}\\n")
-                for i in range(0, len(seq), 80):
-                    out_h.write(seq[i:i+80] + "\\n")
-        return missing
+def write_fasta(out_path, id_list, id_to_seq):
+    missing = 0
+    with open(out_path, "wt") as out_h:
+        for sv in id_list:
+            seq = id_to_seq.get(sv)
+            if not seq:
+                missing += 1
+                continue
+            out_h.write(f">{sv}\n")
+            for i in range(0, len(seq), 80):
+                out_h.write(seq[i:i+80] + "\n")
+    return missing
 
-    def chunk_iterable(iterable, size):
-        chunk = []
-        for x in iterable:
-            chunk.append(x)
-            if len(chunk) >= size:
-                yield chunk
-                chunk = []
-        if chunk:
+def chunk_iterable(iterable, size):
+    chunk = []
+    for x in iterable:
+        chunk.append(x)
+        if len(chunk) >= size:
             yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
-    os.makedirs('study_fastas', exist_ok=True)
+os.makedirs('study_fastas', exist_ok=True)
 
-    df = pd.read_csv("${svl_csv}", sep=",")
-    # Require only 'sv'; if 'study' is missing, assign a single cohort label
-    if 'sv' not in df.columns:
-        print("[ERROR] svl missing required column: 'sv'", file=sys.stderr)
-        sys.exit(2)
-    if 'study' not in df.columns:
-        df['study'] = 'all'
+df = pd.read_csv("${svl_csv}", sep=",")
+# Require only 'sv'; if 'study' is missing, assign a single cohort label
+if 'sv' not in df.columns:
+    print("[ERROR] svl missing required column: 'sv'", file=sys.stderr)
+    sys.exit(2)
+if 'study' not in df.columns:
+    df['study'] = 'all'
 
-    id_to_seq = read_fasta_to_dict("${all_sv_fasta}")
+id_to_seq = read_fasta_to_dict("${all_sv_fasta}")
 
-    # dedup first occurrence of each SV (global)
-    df_first = df.drop_duplicates(subset=["sv"], keep="first").copy()
-    df_first["sequence"] = df_first["sv"].map(id_to_seq.get)
-    df_first.to_csv("dedup_svl_with_seq.csv", index=False)
+# dedup first occurrence of each SV (global)
+df_first = df.drop_duplicates(subset=["sv"], keep="first").copy()
+df_first["sequence"] = df_first["sv"].map(id_to_seq.get)
+df_first.to_csv("dedup_svl_with_seq.csv", index=False)
 
-    # per-study FASTAs (optionally chunked)
-    for study, sub in df.groupby("study"):
-        seen = set(); ordered = []
-        for sv in sub["sv"].tolist():
-            if sv not in seen:
-                seen.add(sv); ordered.append(sv)
-        safe = sanitize_name(study)
-        CHUNK = int(${chunk_size})
-        if CHUNK > 0:
-            part = 0
-            for part, chunk in enumerate(chunk_iterable(ordered, CHUNK), start=1):
-                out_fp = os.path.join('study_fastas', f"{safe}.part{part:03d}.fasta")
-                write_fasta(out_fp, chunk, id_to_seq)
-            if part == 0:
-                # no sequences, still create empty file for consistency
-                open(os.path.join('study_fastas', f"{safe}.part001.fasta"), 'wt').close()
-        else:
-            out_fp = os.path.join('study_fastas', f"{safe}.fasta")
-            write_fasta(out_fp, ordered, id_to_seq)
+# per-study FASTAs (optionally chunked)
+for study, sub in df.groupby("study"):
+    seen = set(); ordered = []
+    for sv in sub["sv"].tolist():
+        if sv not in seen:
+            seen.add(sv); ordered.append(sv)
+    safe = sanitize_name(study)
+    CHUNK = int(${chunk_size})
+    if CHUNK > 0:
+        part = 0
+        for part, chunk in enumerate(chunk_iterable(ordered, CHUNK), start=1):
+            out_fp = os.path.join('study_fastas', f"{safe}.part{part:03d}.fasta")
+            write_fasta(out_fp, chunk, id_to_seq)
+        if part == 0:
+            # no sequences, still create empty file for consistency
+            open(os.path.join('study_fastas', f"{safe}.part001.fasta"), 'wt').close()
+    else:
+        out_fp = os.path.join('study_fastas', f"{safe}.fasta")
+        write_fasta(out_fp, ordered, id_to_seq)
+PY
     """
 }
 process AlignSV {
@@ -325,7 +326,7 @@ process ConvertAlnToFasta {
         file "chunk.aln.fasta"
 
     """
-    #!/usr/bin/env python
+    #!/usr/bin/env python3
     from Bio import AlignIO
 
     with open('chunk.aln.fasta', 'wt') as out_h:
@@ -358,7 +359,7 @@ process ExtractRefpkg {
         path 'refpkg.cm', emit: cm
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import tarfile
 import json
 import os
@@ -567,7 +568,7 @@ process MakeEPAngTaxonomy {
         path 'epang_taxon_file.tsv'
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import csv
 
 tax_dict = {
@@ -651,7 +652,7 @@ process Make_Wide_Tax_Table {
         path "tables/taxon_wide_nreads.${want_rank}.csv", emit: nreads
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import pandas as pd
 import os
 
@@ -719,7 +720,7 @@ process Gappa_Extract_Taxonomy {
         path refpkg_taxtable
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import pandas as pd
 
 MIN_AFRACT = 0
@@ -1059,7 +1060,7 @@ process WeightMaptoLong {
         path ("sp_sv_long.csv")
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import csv
 
 specimen_comSV = {
@@ -1101,7 +1102,7 @@ process SharetableToMapWeight {
         path ("sp_sv_long.csv"), emit: sp_sv_long
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import csv
 
 sp_count = {}
@@ -1169,7 +1170,7 @@ process Extract_Taxonomy {
         file "sv_taxonomy.csv"
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import csv
 import pandas as pd
 import sqlite3
