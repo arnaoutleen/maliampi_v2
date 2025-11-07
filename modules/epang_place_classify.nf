@@ -509,12 +509,12 @@ process EPAngPlacementChunk {
     set -e
     
     # Derive a unique prefix from the chunk fasta name
-    base=$(basename "${chunk_aln_fasta}")
+    base=`basename "${chunk_aln_fasta}"`
     prefix="\${base%.fasta}"
 
     # Split the combined (ref + query) internally and place
     epa-ng --split ${refpkg_aln_fasta} ${chunk_aln_fasta}
-    mdl=$(cat ${model})
+    mdl=`cat ${model}`
     
     epa-ng -t ${ref_tree} \
       -s reference.fasta -q query.fasta \
