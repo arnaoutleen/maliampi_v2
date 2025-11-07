@@ -273,6 +273,7 @@ process PrepSVStudyFastas {
 process AlignSV {
     container = "${container__infernal}"
     label = 'mem_veryhigh'
+    maxForks params.max_parallel_chunks
 
     input:
         path sv_fasta_f
@@ -803,7 +804,7 @@ process EDPL {
 }
 
 process MakeSplit {
-    container = "${container__fastatools}"
+    container = "${container__dada2pplacer}"
     label = 'io_limited'
     publishDir "${params.output}/sv", mode: 'copy'
 
@@ -813,7 +814,7 @@ process MakeSplit {
         path 'sv_multiplicity.csv'
 
 """
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import csv
 
 with open('${sv_long_f}', 'rt') as in_h, open('sv_multiplicity.csv', 'wt') as out_h:
