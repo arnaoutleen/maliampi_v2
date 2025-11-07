@@ -235,10 +235,12 @@ process PrepSVStudyFastas {
     os.makedirs('study_fastas', exist_ok=True)
 
     df = pd.read_csv("${svl_csv}", sep=",")
-    required = {"study","sv"}
-    if not required.issubset(df.columns):
-        print(f"[ERROR] svl missing columns: {required - set(df.columns)}", file=sys.stderr)
+    # Require only 'sv'; if 'study' is missing, assign a single cohort label
+    if 'sv' not in df.columns:
+        print("[ERROR] svl missing required column: 'sv'", file=sys.stderr)
         sys.exit(2)
+    if 'study' not in df.columns:
+        df['study'] = 'all'
 
     id_to_seq = read_fasta_to_dict("${all_sv_fasta}")
 
