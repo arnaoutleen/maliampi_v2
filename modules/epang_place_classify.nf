@@ -175,9 +175,8 @@ process AlignSV {
 }
 
 
-
-
 process CombineAln_SV_refpkg {
+    publishDir "${params.output}/alignment", mode: 'copy'
     container = "${container__easel}"
     label = 'mem_veryhigh'
 
