@@ -117,34 +117,6 @@ workflow epang_place_classify_wf {
     )
 
     //
-    //  Step 7. xPCA
-    //
-
-    Gappa_ePCA(
-         GappaSplit.out
-    )
-
-    //
-    //  Step 8. Alpha diversity
-    //
-    PplacerAlphaDiversity(
-        GappaSplit.out.flatten()
-    )
-    CombineSpAd(
-        PplacerAlphaDiversity.out.toList()    
-    )
-
-    //
-    //  Step 9. KR (phylogenetic) distance 
-    //
-    Gappa_KRD(
-        GappaSplit.out
-    )
-    //
-    //  END Placement
-    //
-
-    //
     //  CLASSIFY
     //
 
@@ -731,58 +703,6 @@ process GappaSplit {
     """
 }
 
-process Gappa_KRD {
-    container = "${container__gappa}"
-    label = 'mem_veryhigh'
-    publishDir "${params.output}/placement/", mode: 'copy'
-    errorStrategy 'ignore'
-
-    input:
-        path specimen_jplace
-    
-    output:
-        path 'krd/krd_matrix.csv.gz'
-
-    """
-    set -e
-
-    gappa analyze krd \
-    --jplace-path ${specimen_jplace} \
-    --krd-out-dir krd/ \
-    --krd-compress \
-    --verbose \
-    --threads ${task.cpus}
-
-    """
-}
-
-process Gappa_ePCA {
-    container = "${container__gappa}"
-    label = 'mem_veryhigh'
-    publishDir "${params.output}/placement/", mode: 'copy'
-    errorStrategy 'ignore'
-
-    input:
-        path specimen_jplace
-    
-    output:
-        path 'ePCA/projection.csv'
-        path 'ePCA/transformation.csv'
-
-    """
-    set -e
-
-    gappa analyze edgepca \
-    --jplace-path ${specimen_jplace} \
-    --out-dir ePCA/ \
-    --verbose \
-    --threads ${task.cpus}
-
-    ls -l ePCA
-
-    """
-}
-
 process PplacerADCL {
     container = "${container__pplacer}"
     label = 'io_limited'
@@ -843,55 +763,6 @@ process PplacerPCA {
     guppy epca ${dedup_jplace_f}:${sv_map_f} -c refpkg/ --out-dir pca/ --prefix epca &&
     guppy lpca ${dedup_jplace_f}:${sv_map_f} -c refpkg/ --out-dir pca/ --prefix lpca
     """
-}
-
-process PplacerAlphaDiversity {
-    container = "${container__pplacer}"
-    label = 'io_limited'
-
-    input:
-        path jplace_f
-    output:
-        path "${jplace_f.getBaseName()}.ad.csv"
-
-    
-    """
-    guppy fpd --csv --include-pendant --chao-d 0,1,1.00001,2,3,4,5 \
-    ${jplace_f} > ${jplace_f.getBaseName()}.ad.csv
-    """
-}
-
-process CombineSpAd {
-    container = "${container__fastatools}"
-    label = 'io_limited'
-    publishDir "${params.output}/placement", mode: 'copy'
-
-    input:
-        path specimen_ad_csv
-    
-    output:
-        path "alpha_diversity.csv.gz"
-    
-"""
-#!/usr/bin/env python
-import csv
-import gzip
-files_to_combine = "${specimen_ad_csv}".split()
-combined_data = [
-    row
-    for fn in files_to_combine
-    for row in csv.DictReader(
-        open(fn, 'rt')
-    )
-]
-
-with gzip.open('alpha_diversity.csv.gz', 'wt') as out_h:
-    out_w = csv.DictWriter(out_h,fieldnames=combined_data[0].keys())
-    out_w.writeheader()
-    out_w.writerows(combined_data)
-
-"""
-
 }
 
 
