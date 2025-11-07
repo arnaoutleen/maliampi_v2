@@ -8,6 +8,10 @@ nextflow.enable.dsl=2
 params.output = '.'
 params.help = false
 
+// SVL/FASTA study split/chunking
+params.svl_csv = null
+params.sv_chunk_size = 0
+
 // pplacer place
 params.pplacer_prior_lower = 0.01
 
@@ -23,6 +27,9 @@ params.pp_nbc_target_rank = 'genus'
 params.pp_nbc_word_length = 8
 params.pp_seed = 1
 params.cmalign_mxsize = 2048
+
+// Chunk placement concurrency
+params.max_parallel_chunks = 4
 
 // Containers!
 container__infernal = "quay.io/biocontainers/infernal:1.1.4--h779adbc_0"
@@ -51,7 +58,6 @@ workflow epang_place_classify_wf {
     //  PLACEMENT
     //
 
-
     // Step 0. Extract bits from the reference
     ExtractRefpkg(
         refpkg_tgz_f
@@ -59,7 +65,7 @@ workflow epang_place_classify_wf {
 
     //
     // Step 1. Align the SV
-    // 
+    //
     AlignSV(
         sv_fasta_f,
         ExtractRefpkg.out.cm
@@ -79,15 +85,18 @@ workflow epang_place_classify_wf {
     )
 
     //
-    //  Step 3. Place SV via epa-ng
+    //  Step 3. Place SV via epa-ng (per chunk)
     //
 
-    EPAngPlacement(
+    EPAngPlacementChunk(
         ExtractRefpkg.out.ref_aln_fasta,
         ConvertAlnToFasta.out,
         ExtractRefpkg.out.model,
         ExtractRefpkg.out.tree
     )
+
+    // Merge all per-chunk jplaces into one
+    MergeJplaces( EPAngPlacementChunk.out.collect() )
 
     //
     //  Step 4. Reduplicate placements
@@ -98,7 +107,7 @@ workflow epang_place_classify_wf {
     )
 
     GappaSplit(
-        EPAngPlacement.out,
+        MergeJplaces.out,
         MakeSplit.out
     )
 
@@ -106,14 +115,14 @@ workflow epang_place_classify_wf {
     //  Step 5. ADCL metric
     //
     PplacerADCL(
-        EPAngPlacement.out
+        MergeJplaces.out
     )
 
     //
     //  Step 6. EDPL metric
     //
     EDPL(
-        EPAngPlacement.out
+        MergeJplaces.out
     )
 
     //
@@ -126,7 +135,7 @@ workflow epang_place_classify_wf {
     )
 
     Gappa_Classify(
-        EPAngPlacement.out,
+        MergeJplaces.out,
         MakeEPAngTaxonomy.out
     )
 
@@ -149,9 +158,115 @@ workflow epang_place_classify_wf {
     )
 
     emit:
-        jplace_dedup = EPAngPlacement.out
+        jplace_dedup = MergeJplaces.out
         taxonomy = Gappa_Extract_Taxonomy.out[0]
 
+}
+process PrepSVStudyFastas {
+    container = "${container__dada2pplacer}"
+    label = 'io_mem'
+    publishDir "${params.output}/sv_prep", mode: 'copy'
+
+    input:
+        path svl_csv
+        path all_sv_fasta
+
+    output:
+        path "dedup_svl_with_seq.csv"
+        path "study_fastas/*.fasta", emit: study_fastas
+
+    script:
+    def chunk_size = params.sv_chunk_size as int
+
+    """
+    #!/usr/bin/env python
+    import argparse, os, re, sys
+    from collections import OrderedDict, defaultdict
+    import pandas as pd
+
+    def read_fasta_to_dict(fp):
+        seqs = OrderedDict()
+        current_id = None
+        buf = []
+        with open(fp, "rt") as fh:
+            for line in fh:
+                line = line.rstrip("\\n")
+                if not line:
+                    continue
+                if line.startswith(">"):
+                    if current_id is not None:
+                        seqs[current_id] = "".join(buf)
+                    header = line[1:].strip()
+                    sv_id = header.split()[0]
+                    current_id = sv_id
+                    buf = []
+                else:
+                    buf.append(line)
+        if current_id is not None:
+            seqs[current_id] = "".join(buf)
+        return seqs
+
+    def sanitize_name(name):
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
+
+    def write_fasta(out_path, id_list, id_to_seq):
+        missing = 0
+        with open(out_path, "wt") as out_h:
+            for sv in id_list:
+                seq = id_to_seq.get(sv)
+                if not seq:
+                    missing += 1
+                    continue
+                out_h.write(f">{sv}\\n")
+                for i in range(0, len(seq), 80):
+                    out_h.write(seq[i:i+80] + "\\n")
+        return missing
+
+    def chunk_iterable(iterable, size):
+        chunk = []
+        for x in iterable:
+            chunk.append(x)
+            if len(chunk) >= size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
+
+    os.makedirs('study_fastas', exist_ok=True)
+
+    df = pd.read_csv("${svl_csv}", sep=",")
+    required = {"study","sv"}
+    if not required.issubset(df.columns):
+        print(f"[ERROR] svl missing columns: {required - set(df.columns)}", file=sys.stderr)
+        sys.exit(2)
+
+    id_to_seq = read_fasta_to_dict("${all_sv_fasta}")
+
+    # dedup first occurrence of each SV (global)
+    df_first = df.drop_duplicates(subset=["sv"], keep="first").copy()
+    df_first["sequence"] = df_first["sv"].map(id_to_seq.get)
+    df_first.to_csv("dedup_svl_with_seq.csv", index=False)
+
+    # per-study FASTAs (optionally chunked)
+    for study, sub in df.groupby("study"):
+        seen = set(); ordered = []
+        for sv in sub["sv"].tolist():
+            if sv not in seen:
+                seen.add(sv); ordered.append(sv)
+        safe = sanitize_name(study)
+        CHUNK = int(""" + str(chunk_size) + """)
+        if CHUNK > 0:
+            part = 0
+            for part, chunk in enumerate(chunk_iterable(ordered, CHUNK), start=1):
+                out_fp = os.path.join('study_fastas', f"{safe}.part{part:03d}.fasta")
+                write_fasta(out_fp, chunk, id_to_seq)
+            if part == 0:
+                # no sequences, still create empty file for consistency
+                open(os.path.join('study_fastas', f"{safe}.part001.fasta"), 'wt').close()
+        else:
+            out_fp = os.path.join('study_fastas', f"{safe}.fasta")
+            write_fasta(out_fp, ordered, id_to_seq)
+    """
 }
 process AlignSV {
     container = "${container__infernal}"
@@ -200,17 +315,17 @@ process ConvertAlnToFasta {
     label = 'io_limited'
     errorStrategy "retry"
 
-    input: 
+    input:
         file combined_aln_sto_f
-    
+
     output:
-        file "combined.aln.fasta"
-    
+        file "chunk.aln.fasta"
+
     """
     #!/usr/bin/env python
     from Bio import AlignIO
 
-    with open('combined.aln.fasta', 'wt') as out_h:
+    with open('chunk.aln.fasta', 'wt') as out_h:
         AlignIO.write(
             AlignIO.read(
                 open('${combined_aln_sto_f}', 'rt'),
@@ -221,6 +336,7 @@ process ConvertAlnToFasta {
         )
     """
 }
+
 
 process ExtractRefpkg {
     container = "${container__fastatools}"
@@ -370,30 +486,66 @@ with open('taxonomy.csv', 'wt') as leaf_h:
 }
 
 
-process EPAngPlacement {
+
+process EPAngPlacementChunk {
     container = "${container__epang}"
     label = 'mem_veryhigh'
-    publishDir "${params.output}/placement", mode: 'copy'
+    publishDir "${params.output}/placement/chunks", mode: 'copy'
+    maxForks params.max_parallel_chunks
+
     input:
         file refpkg_aln_fasta
-        file combined_aln_fasta
+        file chunk_aln_fasta
         file model
         file ref_tree
 
     output:
-        file 'dedup.jplace'
+        file '*.jplace'
+
     """
     set -e
+    
+    # Derive a unique prefix from the chunk fasta name
+    base=$(basename "${chunk_aln_fasta}")
+    prefix="${base%.fasta}"
 
-    epa-ng --split ${refpkg_aln_fasta} ${combined_aln_fasta}
-    model=`cat ${model}`
+    # Split the combined (ref + query) internally and place
+    epa-ng --split ${refpkg_aln_fasta} ${chunk_aln_fasta}
+    mdl=$(cat ${model})
     
     epa-ng -t ${ref_tree} \
-    -s reference.fasta -q query.fasta \
-    -m \$model -T ${task.cpus} \
-    --baseball-heur
+      -s reference.fasta -q query.fasta \
+      -m "$mdl" -T ${task.cpus} \
+      --baseball-heur
 
-    mv epa_result.jplace dedup.jplace
+    mv epa_result.jplace ${prefix}.jplace
+    """
+}
+
+process MergeJplaces {
+    container = "${container__gappa}"
+    label = 'io_limited'
+    publishDir "${params.output}/placement", mode: 'copy'
+
+    input:
+        path jplaces
+
+    output:
+        file 'dedup.jplace'
+
+    """
+    set -e
+    
+    # gappa can merge multiple jplaces into a single file
+    # Use a temp outdir to satisfy gappa's interface
+    mkdir -p merged_out
+    gappa edit merge \
+      --jplace-path ${jplaces} \
+      --out-dir merged_out \
+      --prefix dedup
+    
+    # gappa writes merged_out/dedup.jplace
+    mv merged_out/dedup.jplace dedup.jplace
     """
 }
 
@@ -1109,7 +1261,14 @@ workflow {
 
     refpkg_tgz_f = file(params.refpkg)
 
-    if  (
+    if (
+        params.svl_csv != null && params.sv_fasta != null
+    ) {
+        sv_long_f = file(params.svl_csv)
+        PrepSVStudyFastas( file(params.svl_csv), file(params.sv_fasta) )
+        sv_fasta_f = PrepSVStudyFastas.out.study_fastas
+    }
+    else if  (
         (params.sv_fasta != null) &&
         (params.sv_long != null )
     ) {
@@ -1142,7 +1301,7 @@ workflow {
         map_f = SharetableToMapWeight.out.sv_map
         weights_f = SharetableToMapWeight.out.sv_weights
         sv_long_f = SharetableToMapWeight.out.sp_sv_long
-        
+
     }
     else if (params.seqtable != null) {
         Dada2_convert_output(file(params.seqtable))
