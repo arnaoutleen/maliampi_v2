@@ -131,7 +131,7 @@ workflow epang_place_classify_wf {
 
     MakeEPAngTaxonomy(
         ExtractRefpkg.out.leaf_info,
-        ExtractRefpkg.out.taxonomy,
+        ExtractRefpkg.out.taxonomy
     )
 
     Gappa_Classify(
@@ -362,6 +362,7 @@ import tarfile
 import json
 import os
 import re
+from Bio import AlignIO
 
 tar_h = tarfile.open('${refpkg_tgz_f}')
 tar_contents_dict = {os.path.basename(f.name): f for f in tar_h.getmembers()}
@@ -427,7 +428,7 @@ elif aln_sto_intgz:
                 tar_contents_dict[aln_sto_intgz]
             ).read().decode('utf-8')
         )
-    with sopen('refpkg.aln.fasta','w') as out_aln_fasta_h:
+    with open('refpkg.aln.fasta','w') as out_aln_fasta_h:
         AlignIO.write(
             AlignIO.read(
                             tar_h.extractfile(tar_contents_dict[aln_sto_intgz]),
@@ -508,7 +509,7 @@ process EPAngPlacementChunk {
     set -e
     
     # Derive a unique prefix from the chunk fasta name
-    base=$(basename "${chunk_aln_fasta}")
+    base=${chunk_aln_fasta##*/}
     prefix="${base%.fasta}"
 
     # Split the combined (ref + query) internally and place
