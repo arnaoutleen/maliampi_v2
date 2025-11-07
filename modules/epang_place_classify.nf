@@ -509,7 +509,7 @@ process EPAngPlacementChunk {
     set -e
     
     # Derive a unique prefix from the chunk fasta name
-    base=${chunk_aln_fasta##*/}
+    base=$(basename "${chunk_aln_fasta}")
     prefix="${base%.fasta}"
 
     # Split the combined (ref + query) internally and place
