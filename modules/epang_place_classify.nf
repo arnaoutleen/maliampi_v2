@@ -179,9 +179,9 @@ process PrepSVStudyFastas {
     def chunk_size = params.sv_chunk_size as int
 
     """
-SVL="${svl_csv}"
-FASTA="${all_sv_fasta}"
-CHUNK=${chunk_size}
+export SVL="${svl_csv}"
+export FASTA="${all_sv_fasta}"
+export CHUNK=${chunk_size}
 
 python3 - <<'PY'
 import os, re, sys, csv
