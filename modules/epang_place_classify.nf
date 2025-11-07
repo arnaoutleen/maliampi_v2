@@ -190,7 +190,7 @@ def read_fasta_to_dict(fp):
     buf = []
     with open(fp, "rt") as fh:
         for line in fh:
-            line = line.rstrip("\n")
+            line = line.rstrip("\\n")
             if not line:
                 continue
             if line.startswith(">"):
@@ -217,9 +217,9 @@ def write_fasta(out_path, id_list, id_to_seq):
             if not seq:
                 missing += 1
                 continue
-            out_h.write(f">{sv}\n")
+            out_h.write(f">{sv}\\n")
             for i in range(0, len(seq), 80):
-                out_h.write(seq[i:i+80] + "\n")
+                out_h.write(seq[i:i+80] + "\\n")
     return missing
 
 def chunk_iterable(iterable, size):
