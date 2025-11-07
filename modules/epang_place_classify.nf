@@ -256,7 +256,7 @@ process PrepSVStudyFastas {
             if sv not in seen:
                 seen.add(sv); ordered.append(sv)
         safe = sanitize_name(study)
-        CHUNK = int(""" + str(chunk_size) + """)
+        CHUNK = int(${chunk_size})
         if CHUNK > 0:
             part = 0
             for part, chunk in enumerate(chunk_iterable(ordered, CHUNK), start=1):
