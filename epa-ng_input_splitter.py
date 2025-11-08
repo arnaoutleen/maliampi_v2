@@ -12,8 +12,9 @@ Notes:
 
 Outputs:
   - out/dedup_svl_with_seq.csv                   (first occurrence per sv + sequence)
-  - out/study_fastas/{group}.fasta               (or {group}.partXXX.fasta when chunked)
-  - out/svl_groups/{group}.sv_long.csv           (rows of sv_long matching that group)
+  - out/study_fastas/{group}.fasta               (non-chunked)
+  - out/study_fastas/{group}.partXXX.fasta       (when chunked)
+  - out/svl_groups/{group}.sv_long.csv           (non-chunked) OR out/svl_groups/{group}.partXXX.sv_long.csv (when chunked)
     where {group} = study or study__batch (sanitized)
 
 Usage:
@@ -181,29 +182,33 @@ def main():
                 ordered_unique_svs.append(s)
 
         stem = key_to_stem(key)
-        # paired sv_long subset for this group
-        # Build boolean mask across all grouping columns
+        # Build boolean mask across all grouping columns once
         mask = True
         for col, val in zip(group_cols, key):
             mask = mask & (df[col] == val)
         df_sub = df.loc[mask].copy()
-        svl_path = os.path.join(out_svl_dir, f"{stem}.sv_long.csv")
-        df_sub.to_csv(svl_path, index=False)
 
         if args.chunk_size and args.chunk_size > 0:
-            # Write chunked FASTAs
+            # Write chunked FASTAs and matching per-chunk sv_long CSVs
             total_missing = 0
             part_idx = 0
             for part_idx, chunk in enumerate(chunk_iterable(ordered_unique_svs, args.chunk_size), start=1):
+                # FASTA per chunk
                 out_fp = os.path.join(out_align_dir, f"{stem}.part{part_idx:03d}.fasta")
                 missing = write_fasta(out_fp, chunk, id_to_seq)
                 total_missing += missing
+                # sv_long per chunk (only rows for SVs in this chunk)
+                chunk_svl = df_sub[df_sub[args.sv_col].isin(chunk)].copy()
+                chunk_svl_path = os.path.join(out_svl_dir, f"{stem}.part{part_idx:03d}.sv_long.csv")
+                chunk_svl.to_csv(chunk_svl_path, index=False)
             summary.append((stem, len(ordered_unique_svs), part_idx, total_missing))
-            print(f"[OK] {stem}: wrote {part_idx} chunk(s), {len(ordered_unique_svs)} SVs, missing seqs: {total_missing}; sv_long: {svl_path}")
+            print(f"[OK] {stem}: wrote {part_idx} chunk(s), {len(ordered_unique_svs)} SVs, missing seqs: {total_missing}; sv_long: per-chunk in {out_svl_dir}")
         else:
-            # Single FASTA per group
+            # Single FASTA and single sv_long per group
             out_fp = os.path.join(out_align_dir, f"{stem}.fasta")
             missing = write_fasta(out_fp, ordered_unique_svs, id_to_seq)
+            svl_path = os.path.join(out_svl_dir, f"{stem}.sv_long.csv")
+            df_sub.to_csv(svl_path, index=False)
             summary.append((stem, len(ordered_unique_svs), 1, missing))
             print(f"[OK] {stem}: wrote 1 file, {len(ordered_unique_svs)} SVs, missing seqs: {missing}; sv_long: {svl_path}")
 
