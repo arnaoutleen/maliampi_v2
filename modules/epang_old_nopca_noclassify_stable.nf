@@ -7,7 +7,6 @@ nextflow.enable.dsl=2
 // common
 params.output = '.'
 params.help = false
-params.refpkg = null
 
 // pplacer place
 params.pplacer_prior_lower = 0.01
@@ -36,7 +35,9 @@ container__gappa = 'quay.io/biocontainers/gappa:0.7.1--h9a82719_1'
 
 
 // includes
-include { Dada2_convert_output } from './dada2'
+include { Dada2_convert_output } from './dada2' params (
+    output: params.output
+)
 
 workflow epang_place_classify_wf {
     take:

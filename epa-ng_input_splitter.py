@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-SVL to per-study FASTAs + dedup CSV with sequences.
+SVL to per-study(/batch) FASTAs + dedup CSV with sequences + paired sv_long splits.
 
 Inputs:
-  - svl.csv with columns: specimen,study,sv,count
+  - svl.csv with columns: specimen,study,sv,count  (optionally a batch column)
   - FASTA file with all SV sequences (headers match sv IDs)
 
 Notes:
   - If the 'study' column is missing in svl.csv, the script will create it with value 'all' so you can still split into chunks.
+  - If you provide a batch column name and the column is missing, it will be ignored with a warning.
 
 Outputs:
-  - out/dedup_svl_with_seq.csv      (first occurrence per sv + sequence)
-  - out/study_fastas/{study}.fasta  (all SVs observed in that study)
-  - optional chunked files:
-      out/study_fastas/{study}.part001.fasta, part002.fasta, ...
+  - out/dedup_svl_with_seq.csv                   (first occurrence per sv + sequence)
+  - out/study_fastas/{group}.fasta               (or {group}.partXXX.fasta when chunked)
+  - out/svl_groups/{group}.sv_long.csv           (rows of sv_long matching that group)
+    where {group} = study or study__batch (sanitized)
 
 Usage:
-  python svl_to_fastas.py --svl svl.csv --fasta all_svs.fasta --out out
-  python svl_to_fastas.py --svl svl.csv --fasta all_svs.fasta --out out --chunk-size 5000
+  python epa-ng_input_splitter.py --svl svl.csv --fasta all_svs.fasta --out out
+  python epa-ng_input_splitter.py --svl svl.csv --fasta all_svs.fasta --out out --chunk-size 5000
+  # With batch column named "batch":
+  python epa-ng_input_splitter.py --svl svl.csv --fasta all_svs.fasta --out out --batch-col batch
 """
 
 import argparse
@@ -37,6 +40,7 @@ def parse_args():
     ap.add_argument("--chunk-size", type=int, default=0,
                     help="If >0, split each study FASTA into parts with this many sequences per file.")
     ap.add_argument("--study-col", default="study", help="Column name for study (default: 'study')")
+    ap.add_argument("--batch-col", default=None, help="Optional column name for batch/cohort (default: None)")
     ap.add_argument("--sv-col", default="sv", help="Column name for SV ID (default: 'sv')")
     ap.add_argument("--sep", default=",", help="CSV delimiter for svl.csv (default: ',')")
     return ap.parse_args()
@@ -109,6 +113,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     out_align_dir = os.path.join(args.out, "study_fastas")
     os.makedirs(out_align_dir, exist_ok=True)
+    out_svl_dir = os.path.join(args.out, "svl_groups")
+    os.makedirs(out_svl_dir, exist_ok=True)
 
     # Load data
     df = pd.read_csv(args.svl, sep=args.sep, dtype=str)
@@ -119,6 +125,15 @@ def main():
     if args.study_col not in df.columns:
         # synthesize a single cohort to enable chunking without study
         df[args.study_col] = 'all'
+    # handle optional batch column
+    use_batch = False
+    if args.batch_col:
+        if args.batch_col in df.columns:
+            df[args.batch_col] = df[args.batch_col].fillna('NA')
+            use_batch = True
+        else:
+            print(f"[WARN] batch column '{args.batch_col}' not found; proceeding without batch grouping.", file=sys.stderr)
+            args.batch_col = None
 
     # Keep only first occurrence of each SV (global)
     df_first = df.drop_duplicates(subset=[args.sv_col], keep="first").copy()
@@ -140,17 +155,24 @@ def main():
     df_first.to_csv(dedup_csv, index=False)
     print(f"[OK] Wrote dedup CSV with sequences: {dedup_csv}")
 
-    # Build per-study SV lists from the ORIGINAL df (not dedupbed)
-    study_to_svs = defaultdict(list)
+    # Build per-group SV lists from the ORIGINAL df (not dedupbed)
+    group_cols = [args.study_col] + ([args.batch_col] if args.batch_col else [])
+    group_to_svs = defaultdict(list)
     for _, row in df.iterrows():
-        study = row[args.study_col]
+        key = tuple(row[c] for c in group_cols)
         sv = row[args.sv_col]
-        study_to_svs[study].append(sv)
+        group_to_svs[key].append(sv)
 
-    # Create per-study FASTAs (optionally chunked)
+    def key_to_stem(key_tuple):
+        parts = []
+        for col, val in zip(group_cols, key_tuple):
+            parts.append(f"{col}-{sanitize_name(val)}")
+        return "__".join(parts) if parts else "all"
+
+    # Create per-group FASTAs and paired sv_long splits (optionally chunked)
     summary = []
-    for study, svs in study_to_svs.items():
-        # Keep first occurrence order within study to reduce duplicates in output
+    for key, svs in group_to_svs.items():
+        # Keep first occurrence order within group to reduce duplicates in output
         seen = set()
         ordered_unique_svs = []
         for s in svs:
@@ -158,30 +180,39 @@ def main():
                 seen.add(s)
                 ordered_unique_svs.append(s)
 
-        safe_study = sanitize_name(study)
+        stem = key_to_stem(key)
+        # paired sv_long subset for this group
+        # Build boolean mask across all grouping columns
+        mask = True
+        for col, val in zip(group_cols, key):
+            mask = mask & (df[col] == val)
+        df_sub = df.loc[mask].copy()
+        svl_path = os.path.join(out_svl_dir, f"{stem}.sv_long.csv")
+        df_sub.to_csv(svl_path, index=False)
+
         if args.chunk_size and args.chunk_size > 0:
             # Write chunked FASTAs
             total_missing = 0
             part_idx = 0
             for part_idx, chunk in enumerate(chunk_iterable(ordered_unique_svs, args.chunk_size), start=1):
-                out_fp = os.path.join(out_align_dir, f"{safe_study}.part{part_idx:03d}.fasta")
+                out_fp = os.path.join(out_align_dir, f"{stem}.part{part_idx:03d}.fasta")
                 missing = write_fasta(out_fp, chunk, id_to_seq)
                 total_missing += missing
-            summary.append((study, len(ordered_unique_svs), part_idx, total_missing))
-            print(f"[OK] {study}: wrote {part_idx} chunk(s), {len(ordered_unique_svs)} SVs, missing seqs: {total_missing}")
+            summary.append((stem, len(ordered_unique_svs), part_idx, total_missing))
+            print(f"[OK] {stem}: wrote {part_idx} chunk(s), {len(ordered_unique_svs)} SVs, missing seqs: {total_missing}; sv_long: {svl_path}")
         else:
-            # Single FASTA per study
-            out_fp = os.path.join(out_align_dir, f"{safe_study}.fasta")
+            # Single FASTA per group
+            out_fp = os.path.join(out_align_dir, f"{stem}.fasta")
             missing = write_fasta(out_fp, ordered_unique_svs, id_to_seq)
-            summary.append((study, len(ordered_unique_svs), 1, missing))
-            print(f"[OK] {study}: wrote 1 file, {len(ordered_unique_svs)} SVs, missing seqs: {missing}")
+            summary.append((stem, len(ordered_unique_svs), 1, missing))
+            print(f"[OK] {stem}: wrote 1 file, {len(ordered_unique_svs)} SVs, missing seqs: {missing}; sv_long: {svl_path}")
 
     # Write a small summary TSV
     summary_tsv = os.path.join(args.out, "study_fasta_summary.tsv")
     with open(summary_tsv, "wt") as h:
-        h.write("study\tn_svs\tfiles_written\tmissing_seqs\n")
-        for study, n_svs, files_written, missing in summary:
-            h.write(f"{study}\t{n_svs}\t{files_written}\t{missing}\n")
+        h.write("group\tn_svs\tfiles_written\tmissing_seqs\n")
+        for group, n_svs, files_written, missing in summary:
+            h.write(f"{group}\t{n_svs}\t{files_written}\t{missing}\n")
     print(f"[OK] Summary: {summary_tsv}")
 
 
