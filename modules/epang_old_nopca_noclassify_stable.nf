@@ -26,7 +26,7 @@ params.cmalign_mxsize = 2048
 
 // Containers!
 container__infernal = "quay.io/biocontainers/infernal:1.1.4--h779adbc_0"
-container__fastatools = "golob/fastatools:0.8.0A"
+container__fastatools = "quay.io/biocontainers/biopython:1.76--2"
 container__pplacer = "golob/pplacer:1.1alpha19rc_BCW_0.3.1A"
 container__dada2pplacer = "golob/dada2-pplacer:0.8.0__bcw_0.3.1A"
 container__easel = 'quay.io/biocontainers/easel:0.47--h516909a_0'
@@ -168,32 +168,22 @@ process CombineAln_SV_refpkg {
 }
 
 process ConvertAlnToFasta {
-    container = "${container__fastatools}"
-    label = 'io_limited'
-    publishDir "${params.output}/classify_input", mode: 'copy'
-    errorStrategy "retry"
+  container = "${container__easel}"     // use Easel, not Biopython
+  label = 'io_limited'
+  publishDir "${params.output}/classify_input", mode: 'copy'
+  errorStrategy "retry"
 
-    input: 
-        file combined_aln_sto_f
-    
-    output:
-        file "combined.aln.fasta"
-    
-    """
-    #!/usr/bin/env python3
-    from Bio import AlignIO
+  input:
+    file combined_aln_sto_f
 
-    with open('combined.aln.fasta', 'wt') as out_h:
-        AlignIO.write(
-            AlignIO.read(
-                open('${combined_aln_sto_f}', 'rt'),
-                'stockholm'
-            ),
-            out_h,
-            'fasta'
-        )
-    """
+  output:
+    file "combined.aln.fasta"
+
+  """
+  esl-reformat --informat stockholm fasta ${combined_aln_sto_f} > combined.aln.fasta
+  """
 }
+
 
 process ExtractRefpkg {
     container = "${container__fastatools}"
