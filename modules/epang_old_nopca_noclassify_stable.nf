@@ -30,7 +30,7 @@ container__fastatools = "quay.io/biocontainers/biopython:1.76--2"
 container__pplacer = "golob/pplacer:1.1alpha19rc_BCW_0.3.1A"
 container__dada2pplacer = "golob/dada2-pplacer:0.8.0__bcw_0.3.1A"
 container__easel = 'quay.io/biocontainers/easel:0.47--h516909a_0'
-container__epang = "quay.io/biocontainers/epa-ng:0.3.8--h9a82719_1"
+container__epang = "quay.io/biocontainers/epa-ng:0.3.8--h95f258a_3"
 container__gappa = 'quay.io/biocontainers/gappa:0.7.1--h9a82719_1'
 
 
@@ -168,7 +168,7 @@ process CombineAln_SV_refpkg {
 }
 
 process ConvertAlnToFasta {
-  container = "${container__easel}"     // use Easel, not Biopython
+  container = "${container__fastatools}"   // points to your biopython image
   label = 'io_limited'
   publishDir "${params.output}/classify_input", mode: 'copy'
   errorStrategy "retry"
@@ -180,7 +180,18 @@ process ConvertAlnToFasta {
     file "combined.aln.fasta"
 
   """
-  esl-reformat --informat stockholm fasta ${combined_aln_sto_f} > combined.aln.fasta
+  # Quick sanity: prove Biopython is importable and show version
+  python3 - <<'PY'
+import Bio, sys
+from Bio import AlignIO
+print("Biopython:", Bio.__version__, file=sys.stderr)
+with open('combined.aln.fasta','wt') as out_h:
+    AlignIO.write(
+        AlignIO.read(open('${combined_aln_sto_f}','rt'),'stockholm'),
+        out_h,
+        'fasta'
+    )
+PY
   """
 }
 
